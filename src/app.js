@@ -17,6 +17,7 @@ import {
   formatBytes,
   formatFailure,
   parseTarget,
+  remoteListDirCommand,
   remoteShellCommand,
   resolveMuxEnabled,
   safe,
@@ -100,7 +101,7 @@ export function createHandlers(transport, {
     }),
 
     ssh_list_dir: async ({ target, path = "." }) => safe(async () => {
-      const result = await transport.exec(target, remoteShellCommand(`find ${shellQuote(path)} -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%TY-%Tm-%Td %TH:%TM:%TS\\t%p\\n' | sort`));
+      const result = await transport.exec(target, remoteShellCommand(remoteListDirCommand(path)));
       return textResult(decodeUtf8(result.stdout));
     }),
 

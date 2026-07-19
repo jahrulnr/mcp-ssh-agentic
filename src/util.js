@@ -207,6 +207,45 @@ export function remoteShellCommand(command) {
   return `if command -v bash >/dev/null 2>&1; then bash --noprofile --norc -c ${shellQuote(command)}; else sh -c ${shellQuote(command)}; fi`;
 }
 
+/**
+ * List a remote directory with type/size/mtime/path.
+ * Uses GNU find -printf when available; otherwise a BSD/POSIX-friendly fallback
+ * (needed for macOS clients running the mock transport, and macOS remotes).
+ * @param {string} path
+ */
+export function remoteListDirCommand(path) {
+  const p = shellQuote(path);
+  return [
+    "set -e",
+    `path=${p}`,
+    "if find --version >/dev/null 2>&1; then",
+    "  find \"$path\" -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%TY-%Tm-%Td %TH:%TM:%TS\\t%p\\n' | sort",
+    "else",
+    "  find \"$path\" -maxdepth 1 -mindepth 1 | sort | while IFS= read -r entry; do",
+    "    if [ -L \"$entry\" ]; then t=l",
+    "    elif [ -d \"$entry\" ]; then t=d",
+    "    elif [ -f \"$entry\" ]; then t=f",
+    "    elif [ -b \"$entry\" ]; then t=b",
+    "    elif [ -c \"$entry\" ]; then t=c",
+    "    elif [ -p \"$entry\" ]; then t=p",
+    "    elif [ -S \"$entry\" ]; then t=s",
+    "    else t=u",
+    "    fi",
+    "    if [ -f \"$entry\" ] && [ ! -L \"$entry\" ]; then",
+    "      s=$(wc -c < \"$entry\" | tr -d '[:space:]')",
+    "    else",
+    "      s=0",
+    "    fi",
+    "    m=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' \"$entry\" 2>/dev/null || true)",
+    "    if [ -z \"$m\" ]; then",
+    "      m=$(stat -c '%y' \"$entry\" 2>/dev/null | cut -c1-19 || echo '?')",
+    "    fi",
+    "    printf '%s\\t%s\\t%s\\t%s\\n' \"$t\" \"$s\" \"$m\" \"$entry\"",
+    "  done",
+    "fi",
+  ].join("\n");
+}
+
 export function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;

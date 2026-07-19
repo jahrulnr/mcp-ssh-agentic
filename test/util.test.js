@@ -10,6 +10,7 @@ import {
   isStaleMuxError,
   muxOptions,
   parseTarget,
+  remoteListDirCommand,
   remoteShellCommand,
   resolveMuxEnabled,
   shellQuote,
@@ -57,6 +58,16 @@ describe("remoteShellCommand", () => {
     const cmd = remoteShellCommand("echo hi");
     assert.match(cmd, /bash --noprofile --norc -c 'echo hi'/);
     assert.doesNotMatch(cmd, /bash -lc|sh -lc/);
+  });
+});
+
+describe("remoteListDirCommand", () => {
+  it("prefers GNU find -printf with a BSD/POSIX fallback", () => {
+    const cmd = remoteListDirCommand("/tmp/listed");
+    assert.match(cmd, /find --version/);
+    assert.match(cmd, /-printf/);
+    assert.match(cmd, /stat -f/);
+    assert.match(cmd, /\/tmp\/listed/);
   });
 });
 
