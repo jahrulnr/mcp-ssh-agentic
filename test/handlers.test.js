@@ -266,6 +266,18 @@ describe("handlers via mock transport (SSH contract)", () => {
     assert.match(textOf(list), /no active interactive sessions/);
   });
 
+  it("ssh_interactive_exec captures stderr in the session buffer", async () => {
+    const started = await api.handlers.ssh_interactive_exec({
+      target: TARGET,
+      command: "printf 'err\\n' >&2; printf 'out\\n'",
+      quiet_ms: 150,
+    });
+    const text = textOf(started);
+    assert.match(text, /err/);
+    assert.match(text, /out/);
+    assert.match(text, /exited \(code 0\)/);
+  });
+
   it("ssh_interactive_close removes a running session", async () => {
     const started = await api.handlers.ssh_interactive_exec({
       target: TARGET,

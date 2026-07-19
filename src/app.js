@@ -172,6 +172,7 @@ export function createHandlers(transport, {
         lastDataAt: now(), lastActivity: now(),
       };
       child.stdout.on("data", (chunk) => { appendToSessionBuffer(session, chunk); session.lastDataAt = now(); });
+      child.stderr?.on("data", (chunk) => { appendToSessionBuffer(session, chunk); session.lastDataAt = now(); });
       child.on("exit", (code, signal) => { session.exited = true; session.exitCode = code ?? (signal ? 1 : 0); });
       child.on("error", (error) => { session.exited = true; session.exitCode = 1; session.error = error.message; });
       interactiveSessions.set(id, session);

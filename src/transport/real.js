@@ -13,6 +13,7 @@ import {
   muxOptions,
   parseTarget,
   resolveMuxEnabled,
+  scpRemoteSpec,
   sshArgs,
 } from "../util.js";
 
@@ -42,19 +43,24 @@ export function spawnCaptured(command, args, {
     const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], cwd, env });
     const stdout = [];
     const stderr = [];
-    let size = 0;
+    let stdoutSize = 0;
+    let stderrSize = 0;
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
     child.stdout.on("data", (chunk) => {
-      size += chunk.length;
-      if (size <= maxBytes) stdout.push(chunk);
+      stdoutSize += chunk.length;
+      if (stdoutSize <= maxBytes) stdout.push(chunk);
     });
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderrSize += chunk.length;
+      if (stderrSize <= maxBytes) stderr.push(chunk);
+    });
     child.on("error", (error) => { clearTimeout(timer); reject(error); });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
       if (timedOut) return reject(new Error(`${command} timed out after ${timeoutMs}ms`));
-      if (size > maxBytes) return reject(new Error(`remote output exceeded ${maxBytes} bytes`));
+      if (stdoutSize > maxBytes) return reject(new Error(`remote output exceeded ${maxBytes} bytes`));
+      if (stderrSize > maxBytes) return reject(new Error(`remote stderr output exceeded ${maxBytes} bytes`));
       resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code: code ?? 1, signal });
     });
     if (stdin !== undefined) child.stdin.end(stdin); else child.stdin.end();
@@ -100,7 +106,7 @@ export function createRealTransport({ muxDir, muxEnabled: muxEnabledOption } = {
     if (localPath.includes("\0") || remotePath.includes("\0")) throw new Error("paths must not contain NUL");
 
     const parsed = parseTarget(target);
-    const remoteSpec = `${parsed.userHost}:${remotePath}`;
+    const remoteSpec = scpRemoteSpec(parsed.userHost, remotePath);
 
     const buildArgs = () => {
       const args = [

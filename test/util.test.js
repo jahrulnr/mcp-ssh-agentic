@@ -13,6 +13,7 @@ import {
   remoteListDirCommand,
   remoteShellCommand,
   resolveMuxEnabled,
+  scpRemoteSpec,
   shellQuote,
   sshArgs,
 } from "../src/util.js";
@@ -54,10 +55,15 @@ describe("shellQuote", () => {
 });
 
 describe("remoteShellCommand", () => {
-  it("uses non-login bash with quoted command", () => {
+  it("uses non-login bash with -- separator and quoted command", () => {
     const cmd = remoteShellCommand("echo hi");
-    assert.match(cmd, /bash --noprofile --norc -c 'echo hi'/);
+    assert.match(cmd, /bash --noprofile --norc -c -- 'echo hi'/);
     assert.doesNotMatch(cmd, /bash -lc|sh -lc/);
+  });
+
+  it("does not treat leading dash commands as bash options", () => {
+    const cmd = remoteShellCommand("-n");
+    assert.match(cmd, /bash --noprofile --norc -c -- '-n'/);
   });
 });
 
@@ -103,6 +109,21 @@ describe("describeLocalClient", () => {
     }), "windows-powershell");
     assert.equal(describeLocalClient({ platform: "win32", env: { ComSpec: "C:\\Windows\\system32\\cmd.exe" } }), "windows-cmd");
     assert.equal(describeLocalClient({ platform: "win32", env: {} }), "windows");
+  });
+});
+
+describe("scpRemoteSpec", () => {
+  it("builds a plain host:path spec", () => {
+    assert.equal(scpRemoteSpec("demo@host", "/tmp/file"), "demo@host:/tmp/file");
+  });
+
+  it("brackets IPv6 hosts for scp", () => {
+    assert.equal(scpRemoteSpec("demo@::1", "/tmp/file"), "demo@[::1]:/tmp/file");
+    assert.equal(scpRemoteSpec("demo@[2001:db8::1]", "/tmp/file"), "demo@[2001:db8::1]:/tmp/file");
+  });
+
+  it("preserves a bare host", () => {
+    assert.equal(scpRemoteSpec("host", "/path"), "host:/path");
   });
 });
 

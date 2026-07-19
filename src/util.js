@@ -85,6 +85,22 @@ export function shellQuote(value) {
 }
 
 /**
+ * Build an scp `user@host:path` spec that brackets IPv6 addresses.
+ * OpenSSH `scp` requires `[user@host]:path` when the host contains colons.
+ * @param {string} userHost as returned by parseTarget (e.g. "demo@host" or "demo@::1")
+ * @param {string} remotePath
+ */
+export function scpRemoteSpec(userHost, remotePath) {
+  const at = userHost.lastIndexOf("@");
+  const user = at >= 0 ? userHost.slice(0, at + 1) : "";
+  let host = at >= 0 ? userHost.slice(at + 1) : userHost;
+  if (!host.startsWith("[") && !host.endsWith("]") && host.includes(":")) {
+    host = `[${host}]`;
+  }
+  return `${user}${host}:${remotePath}`;
+}
+
+/**
  * @param {string} target
  * @param {string} muxDir
  * @param {{ platform?: NodeJS.Platform }} [opts]
@@ -204,7 +220,7 @@ export function combineStreams(stdout, stderr) {
 
 /** Non-login shell so broken /etc/profile.d scripts cannot abort the command. */
 export function remoteShellCommand(command) {
-  return `if command -v bash >/dev/null 2>&1; then bash --noprofile --norc -c ${shellQuote(command)}; else sh -c ${shellQuote(command)}; fi`;
+  return `if command -v bash >/dev/null 2>&1; then bash --noprofile --norc -c -- ${shellQuote(command)}; else sh -c -- ${shellQuote(command)}; fi`;
 }
 
 /**
