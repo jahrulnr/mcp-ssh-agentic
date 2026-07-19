@@ -106,7 +106,7 @@ Untuk menguji protokol MCP, gunakan MCP Inspector atau client MCP yang mendukung
 
 GitHub Actions (`.github/workflows/ci.yml`):
 
-1. **Branch / PR apa pun** — test di Node 18–24
+1. **Branch / PR apa pun** — test di Node 18 / 22 / 24
 2. **Push ke `master`** — test, lalu jika tag `vX.Y.Z` belum ada: buat tag + publish ke **GitHub Packages** dan **npmjs**
 
 Naikkan `version` di `package.json` sebelum merge ke `master`. Secret: `NPM_TOKEN`. GitHub Packages memakai `GITHUB_TOKEN` bawaan.

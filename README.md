@@ -106,7 +106,7 @@ To test the MCP protocol, use MCP Inspector or any MCP client that supports stdi
 
 GitHub Actions (`.github/workflows/ci.yml`):
 
-1. **Any branch / PR** — `npm ci` → `npm run check` → `npm test` (Node 18–24)
+1. **Any branch / PR** — `npm ci` → `npm run check` → `npm test` (Node 18 / 22 / 24)
 2. **Push to `master`** (after merge) — same tests, then if `package.json` version `X.Y.Z` has no git tag `vX.Y.Z` yet:
    - create & push annotated tag `vX.Y.Z`
    - publish `@jahrulnr/mcp-ssh-agentic` to **GitHub Packages** (`GITHUB_TOKEN`)
