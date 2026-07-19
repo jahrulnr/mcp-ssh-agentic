@@ -12,13 +12,12 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test
+  unit-test:
+    name: Unit test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Skip Node 20 — GHA action runtime deprecation; cover engines (>=18) + current LTS/current
         node-version: [18, 22, 24]
     steps:
       - name: Checkout
@@ -37,11 +36,38 @@ jobs:
         run: npm run check
 
       - name: Unit tests
-        run: npm test
+        run: npm run test:unit
+
+  mcp-test:
+    name: MCP test
+    needs: unit-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 22, 24]
+        smoke-mode: [node, npx]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: MCP smoke (${{ matrix.smoke-mode }})
+        run: npm run test:mcp:${{ matrix.smoke-mode }}
+        env:
+          MCP_SSH_AGENTIC_MOCK: "1"
 
   release:
     name: Tag & Publish
-    needs: test
+    needs: [unit-test, mcp-test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:

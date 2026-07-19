@@ -106,12 +106,12 @@ To test the MCP protocol, use MCP Inspector or any MCP client that supports stdi
 
 GitHub Actions (`.github/workflows/ci.yml`):
 
-1. **Any branch / PR** — `npm ci` → `npm run check` → `npm test` (Node 18 / 22 / 24)
-2. **Push to `master`** (after merge) — same tests, then if `package.json` version `X.Y.Z` has no git tag `vX.Y.Z` yet:
-   - create & push annotated tag `vX.Y.Z`
-   - publish `@jahrulnr/mcp-ssh-agentic` to **GitHub Packages** (`GITHUB_TOKEN`)
-   - publish the same package to **npmjs** (`NPM_TOKEN`, `--access public --provenance`)
+1. **Unit test** (any branch/PR) — Node 18 / 22 / 24 → `npm run check` + `npm run test:unit`
+2. **MCP test** (after unit) — same Node matrix × (`node` bin | `npx` from `npm pack`) with `MCP_SSH_AGENTIC_MOCK=1`
+3. **Push to `master`** — after both pass, if tag `vX.Y.Z` is new: create tag → publish to GitHub Packages + npmjs
 
-Bump `version` in `package.json` before merging to `master` when you want a new release. Re-merging the same version skips tag/publish.
+Local: `npm run test:all`
 
-**Secrets:** `NPM_TOKEN` (npm automation token). GitHub Packages uses the built-in `GITHUB_TOKEN` (`packages: write`).
+Bump `version` in `package.json` before merging to `master` for a new release. Re-merging the same version skips tag/publish.
+
+**Secrets:** `NPM_TOKEN`. GitHub Packages uses `GITHUB_TOKEN` (`packages: write`).
