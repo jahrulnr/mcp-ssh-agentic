@@ -1,12 +1,16 @@
 {
   "name": "@jahrulnr/mcp-ssh-agentic",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "MCP server for agentic passwordless SSH/SCP with ControlMaster connection reuse",
   "type": "module",
   "bin": {
     "mcp-ssh-agentic": "src/cli.js"
   },
-  "files": ["src", "README.md", "LICENSE"],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node src/cli.js",
     "check": "node --check src/cli.js src/index.js src/app.js src/util.js src/transport/real.js src/transport/mock.js",
