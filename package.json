@@ -1,0 +1,34 @@
+{
+  "name": "@jahrulnr/mcp-ssh-agentic",
+  "version": "0.4.0",
+  "description": "MCP server for agentic passwordless SSH/SCP with ControlMaster connection reuse",
+  "type": "module",
+  "bin": {
+    "mcp-ssh-agentic": "src/index.js"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js src/app.js src/util.js src/transport/real.js src/transport/mock.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jahrulnr/mcp-ssh-agentic.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jahrulnr/mcp-ssh-agentic/issues"
+  },
+  "homepage": "https://github.com/jahrulnr/mcp-ssh-agentic#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "license": "MIT"
+}
