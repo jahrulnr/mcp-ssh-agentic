@@ -1,4 +1,4 @@
-import { dirname } from "node:path";
+import { dirname as posixDirname } from "node:path/posix";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { z } from "zod";
@@ -12,16 +12,20 @@ import {
   appendToSessionBuffer,
   combineStreams,
   decodeUtf8,
+  describeLocalClient,
   drainSessionOutput,
   formatBytes,
   formatFailure,
   parseTarget,
   remoteShellCommand,
+  resolveMuxEnabled,
   safe,
   settleSession,
   shellQuote,
   textResult,
 } from "./util.js";
+
+const SUPPORTS_PROCESS_GROUPS = process.platform !== "win32";
 
 /**
  * @param {import('./transport/contract.js').SshTransport} transport
@@ -36,7 +40,9 @@ export function createHandlers(transport, {
     const child = session.child;
     if (!child || child.killed) return;
     try {
-      if (child.pid) process.kill(-child.pid, "SIGKILL");
+      // Negative PID = process group; only works on Unix. Windows (cmd/PowerShell/Git Bash Node) uses child.kill.
+      if (SUPPORTS_PROCESS_GROUPS && child.pid) process.kill(-child.pid, "SIGKILL");
+      else child.kill("SIGKILL");
     } catch {
       try { child.kill("SIGKILL"); } catch { /* ignore */ }
     }
@@ -72,7 +78,7 @@ export function createHandlers(transport, {
 
     ssh_write_file: async ({ target, path, content, append = false, create_dirs = true }) => safe(async () => {
       if (Buffer.byteLength(content, "utf8") > MAX_TEXT_BYTES) throw new Error(`content exceeds ${MAX_TEXT_BYTES} bytes`);
-      const mkdirCmd = create_dirs ? `mkdir -p -- ${shellQuote(dirname(path))} && ` : "";
+      const mkdirCmd = create_dirs ? `mkdir -p -- ${shellQuote(posixDirname(path))} && ` : "";
       const redirect = append ? ">>" : ">";
       const command = `${mkdirCmd}cat ${redirect} ${shellQuote(path)}`;
       await transport.exec(target, remoteShellCommand(command), { stdin: content, maxBytes: MAX_TEXT_BYTES });
@@ -242,6 +248,13 @@ export function createHandlers(transport, {
 
     ssh_close: async ({ target }) => safe(async () => {
       const { userHost } = parseTarget(target);
+      const muxOn = typeof transport.getMuxEnabled === "function" ? transport.getMuxEnabled() : true;
+      if (!muxOn) {
+        return textResult(
+          `Multiplexing is disabled on this client (${describeLocalClient()}); nothing to close for ${userHost}. `
+          + "SSH still works — each call opens a fresh connection. Set MCP_SSH_AGENTIC_MUX=1 to force mux if your ssh supports ControlMaster (e.g. WSL).",
+        );
+      }
       const result = await transport.close(target);
       if (result.code === 0) return textResult(`Closed multiplexed connection to ${userHost}`);
       const err = decodeUtf8(result.stderr).trim();
@@ -264,18 +277,27 @@ export function createApp(transport, { version = "0.4.0" } = {}) {
   const path = z.string().min(1).describe("Absolute or relative path on the remote host.");
   const localPath = z.string().min(1).describe("Absolute or relative path on the local machine.");
 
+  const muxOn = typeof transport.getMuxEnabled === "function" ? transport.getMuxEnabled() : resolveMuxEnabled();
+  const client = describeLocalClient();
+  const muxInstructions = muxOn
+    ? "SSH ControlMaster multiplexing is enabled (socket under ~/.cache/mcp-ssh-agentic/mux, ControlPersist=600s). Use ssh_close to drop the master."
+    : `SSH ControlMaster multiplexing is disabled on this client (${client}). `
+      + "Native Windows OpenSSH (cmd.exe, PowerShell, and Git Bash when using Win32-OpenSSH) does not support ControlMaster; each call uses a fresh SSH connection. "
+      + "Prefer WSL for multiplexing, or set MCP_SSH_AGENTIC_MUX=1 only if your ssh client actually supports ControlMaster.";
+
   const server = new McpServer({
     name: "mcp-ssh-agentic",
     version,
   }, {
     instructions: [
-      "Remote operations use the local ssh/scp binaries with BatchMode=yes and SSH ControlMaster multiplexing (shared socket under ~/.cache/mcp-ssh-agentic/mux, ControlPersist=600s).",
+      "Remote operations use the local ssh/scp binaries with BatchMode=yes.",
+      muxInstructions,
       "Do not assume a command succeeded unless its tool result says so.",
       "All remote commands run inside a non-login, non-interactive shell (bash --noprofile --norc, or sh) so broken /etc/profile.d scripts cannot corrupt output.",
       "ssh_exec reports exit_code and may include [stderr]; non-zero exits set isError but still return stdout.",
       "ssh_write_file writes text content directly to a remote file (no local temp file needed); ssh_mkdir creates remote directories.",
       "For commands that may prompt for input (sudo password, y/N confirmations, wizards, REPLs), use ssh_interactive_exec (allocates a remote PTY) followed by ssh_interactive_input to reply or poll; close sessions with ssh_interactive_close when done.",
-      "ssh_scp_to uploads local→remote; ssh_scp_from downloads remote→local. Use ssh_close to drop a multiplexed connection.",
+      "ssh_scp_to uploads local→remote; ssh_scp_from downloads remote→local.",
     ].join(" "),
   });
 
@@ -313,21 +335,21 @@ export function createApp(transport, { version = "0.4.0" } = {}) {
   }, handlers.ssh_interactive_input);
   server.tool("ssh_interactive_close", "Kill and remove an interactive SSH session started with ssh_interactive_exec.", { session_id: z.string().min(1) }, handlers.ssh_interactive_close);
   server.tool("ssh_interactive_list", "List currently open interactive SSH sessions.", {}, handlers.ssh_interactive_list);
-  server.tool("ssh_scp_to", "Upload a local file or directory to the remote host via scp (reuses the multiplexed SSH connection).", {
+  server.tool("ssh_scp_to", "Upload a local file or directory to the remote host via scp (reuses the multiplexed SSH connection when mux is enabled).", {
     target,
     local_path: localPath,
     remote_path: path,
     recursive: z.boolean().default(false).describe("Required when local_path is a directory."),
     timeout_ms: z.number().int().min(1000).max(600000).default(120000),
   }, handlers.ssh_scp_to);
-  server.tool("ssh_scp_from", "Download a remote file or directory to the local machine via scp (reuses the multiplexed SSH connection).", {
+  server.tool("ssh_scp_from", "Download a remote file or directory to the local machine via scp (reuses the multiplexed SSH connection when mux is enabled).", {
     target,
     remote_path: path,
     local_path: localPath,
     recursive: z.boolean().default(false).describe("Required when remote_path is a directory."),
     timeout_ms: z.number().int().min(1000).max(600000).default(120000),
   }, handlers.ssh_scp_from);
-  server.tool("ssh_close", "Close the multiplexed SSH master connection for a target (optional cleanup).", { target }, handlers.ssh_close);
+  server.tool("ssh_close", "Close the multiplexed SSH master connection for a target (no-op when multiplexing is disabled, e.g. native Windows OpenSSH).", { target }, handlers.ssh_close);
 
   const pruneTimer = setInterval(pruneStaleSessions, 60000);
   if (typeof pruneTimer.unref === "function") pruneTimer.unref();

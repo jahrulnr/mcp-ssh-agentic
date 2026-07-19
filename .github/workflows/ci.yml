@@ -13,11 +13,12 @@ permissions:
 
 jobs:
   unit-test:
-    name: Unit test
-    runs-on: ubuntu-latest
+    name: Unit test (${{ matrix.os }}, Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         node-version: [18, 22, 24]
     steps:
       - name: Checkout
@@ -39,12 +40,13 @@ jobs:
         run: npm run test:unit
 
   mcp-test:
-    name: MCP test
+    name: MCP test (${{ matrix.os }}, Node ${{ matrix.node-version }}, ${{ matrix.smoke-mode }})
     needs: unit-test
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         node-version: [18, 22, 24]
         smoke-mode: [node, npx]
     steps:

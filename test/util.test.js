@@ -3,11 +3,15 @@ import { describe, it } from "node:test";
 import {
   combineStreams,
   controlPathFor,
+  describeLocalClient,
   formatBytes,
   formatFailure,
+  isMuxUnsupportedError,
   isStaleMuxError,
+  muxOptions,
   parseTarget,
   remoteShellCommand,
+  resolveMuxEnabled,
   shellQuote,
   sshArgs,
 } from "../src/util.js";
@@ -56,15 +60,59 @@ describe("remoteShellCommand", () => {
   });
 });
 
-describe("sshArgs", () => {
-  it("includes BatchMode, mux, and remote command after --", () => {
-    const args = sshArgs("demo@host:2222", "true", "/tmp/mux");
+describe("resolveMuxEnabled", () => {
+  it("disables mux on win32 by default (cmd / PowerShell / Git Bash)", () => {
+    assert.equal(resolveMuxEnabled({ platform: "win32", env: {} }), false);
+  });
+
+  it("enables mux on linux and darwin by default", () => {
+    assert.equal(resolveMuxEnabled({ platform: "linux", env: {} }), true);
+    assert.equal(resolveMuxEnabled({ platform: "darwin", env: {} }), true);
+  });
+
+  it("honors MCP_SSH_AGENTIC_MUX override", () => {
+    assert.equal(resolveMuxEnabled({ platform: "win32", env: { MCP_SSH_AGENTIC_MUX: "1" } }), true);
+    assert.equal(resolveMuxEnabled({ platform: "linux", env: { MCP_SSH_AGENTIC_MUX: "0" } }), false);
+    assert.equal(resolveMuxEnabled({ platform: "win32", env: { MCP_SSH_AGENTIC_MUX: "yes" } }), true);
+    assert.equal(resolveMuxEnabled({ platform: "darwin", env: { MCP_SSH_AGENTIC_MUX: "off" } }), false);
+  });
+});
+
+describe("describeLocalClient", () => {
+  it("labels unix platforms", () => {
+    assert.equal(describeLocalClient({ platform: "linux", env: {} }), "linux");
+    assert.equal(describeLocalClient({ platform: "darwin", env: {} }), "darwin");
+  });
+
+  it("distinguishes common Windows shells when env hints exist", () => {
+    assert.equal(describeLocalClient({ platform: "win32", env: { MSYSTEM: "MINGW64" } }), "windows-git-bash");
+    assert.equal(describeLocalClient({
+      platform: "win32",
+      env: { POWERSHELL_DISTRIBUTION_CHANNEL: "Windows Store" },
+    }), "windows-powershell");
+    assert.equal(describeLocalClient({ platform: "win32", env: { ComSpec: "C:\\Windows\\system32\\cmd.exe" } }), "windows-cmd");
+    assert.equal(describeLocalClient({ platform: "win32", env: {} }), "windows");
+  });
+});
+
+describe("sshArgs / muxOptions", () => {
+  it("includes BatchMode, mux, and remote command after -- when mux enabled", () => {
+    const args = sshArgs("demo@host:2222", "true", "/tmp/mux", { muxEnabled: true });
     assert.ok(args.includes("BatchMode=yes"));
+    assert.ok(args.includes("ControlMaster=auto"));
     assert.ok(args.includes("-p"));
     assert.ok(args.includes("2222"));
     assert.equal(args.at(-2), "--");
     assert.equal(args.at(-1), "true");
     assert.equal(args.at(-3), "demo@host");
+  });
+
+  it("omits ControlMaster options when mux disabled", () => {
+    const args = sshArgs("demo@host:2222", "true", "/tmp/mux", { muxEnabled: false });
+    assert.equal(muxOptions("demo@host", "/tmp/mux", { enabled: false }).length, 0);
+    assert.ok(!args.some((a) => String(a).includes("ControlMaster")));
+    assert.ok(!args.some((a) => String(a).includes("ControlPath")));
+    assert.ok(args.includes("BatchMode=yes"));
   });
 
   it("derives stable control path", () => {
@@ -73,12 +121,24 @@ describe("sshArgs", () => {
     assert.equal(a, b);
     assert.match(a, /\/tmp\/mux\/[0-9a-f]{24}$/);
   });
+
+  it("uses forward slashes for ControlPath on win32", () => {
+    const path = controlPathFor("demo@host", "C:\\Users\\me\\.cache\\mux", { platform: "win32" });
+    assert.ok(!path.includes("\\"));
+    assert.match(path, /^C:\/Users\/me\/\.cache\/mux\/[0-9a-f]{24}$/);
+  });
 });
 
 describe("helpers", () => {
   it("detects stale mux errors", () => {
     assert.equal(isStaleMuxError("Control socket connect failed"), true);
     assert.equal(isStaleMuxError("permission denied"), false);
+  });
+
+  it("detects Windows ControlMaster unsupported errors", () => {
+    assert.equal(isMuxUnsupportedError("getsockname failed: Not a socket"), true);
+    assert.equal(isMuxUnsupportedError("getsockname failed: Bad file descriptor"), true);
+    assert.equal(isMuxUnsupportedError("permission denied"), false);
   });
 
   it("formats failure with stderr preference", () => {

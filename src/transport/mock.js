@@ -167,6 +167,7 @@ export function createMockTransport({
     scp,
     close,
     spawnInteractive,
+    getMuxEnabled: () => true,
     dispose,
     resolvePath: (p) => resolveRemotePath(root, p),
   };

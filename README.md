@@ -4,13 +4,46 @@ An MCP server for agentic SSH/SCP operations with passwordless authentication. I
 
 ## Connection Efficiency
 
-Each target uses **SSH ControlMaster** multiplexing:
+On **Linux** and **macOS**, each target uses **SSH ControlMaster** multiplexing:
 
 - Socket: `~/.cache/mcp-ssh-agentic/mux/<hash>`
 - `ControlPersist=600` (master connection stays alive for 10 minutes of idle time)
-- Subsequent calls to the same host reuse the existing TCP connection and authentication, making operations much faster than opening a new SSH connection for every tool call.
-- Stale sockets are automatically removed and the connection is retried once.
-- `ssh_close` explicitly closes the master connection.
+- Subsequent calls to the same host reuse the existing TCP connection and authentication
+- Stale sockets are automatically removed and the connection is retried once
+- `ssh_close` explicitly closes the master connection
+
+### Windows (cmd / PowerShell / Git Bash)
+
+Native **Win32-OpenSSH** does not support ControlMaster (this affects all three common Windows shells — they share the same `ssh.exe`). Multiplexing is **disabled by default** on `win32`; every tool call opens a fresh SSH connection. Behavior is otherwise the same.
+
+| Client | Mux default | Notes |
+|---|---|---|
+| Windows cmd.exe | off | Uses Win32-OpenSSH |
+| Windows PowerShell / pwsh | off | Same OpenSSH client |
+| Git Bash | off | Usually the same Win32-OpenSSH on `PATH` |
+| WSL (Ubuntu, etc.) | on | Runs as Linux — preferred on Windows for connection reuse |
+| macOS / Linux | on | Full ControlMaster support |
+
+If a ControlMaster error is still seen (for example after forcing mux on), the server auto-disables multiplexing for the rest of the process and retries without it.
+
+Override with env:
+
+```json
+{
+  "mcpServers": {
+    "ssh-agentic": {
+      "command": "npx",
+      "args": ["-y", "@jahrulnr/mcp-ssh-agentic"],
+      "env": {
+        "MCP_SSH_AGENTIC_MUX": "0"
+      }
+    }
+  }
+}
+```
+
+- `MCP_SSH_AGENTIC_MUX=0` — force off (also: `false`, `no`, `off`)
+- `MCP_SSH_AGENTIC_MUX=1` — force on (only if your `ssh` actually supports ControlMaster)
 
 ## Running with npx
 

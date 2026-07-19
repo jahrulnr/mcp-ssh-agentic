@@ -8,9 +8,11 @@ import {
   decodeUtf8,
   formatFailure,
   interactiveSshArgs,
+  isMuxUnsupportedError,
   isStaleMuxError,
   muxOptions,
   parseTarget,
+  resolveMuxEnabled,
   sshArgs,
 } from "../util.js";
 
@@ -60,12 +62,15 @@ export function spawnCaptured(command, args, {
 }
 
 /**
- * Real transport: local `ssh` / `scp` binaries + ControlMaster mux.
- * @param {{ muxDir: string }} options
- * @returns {import('./contract.js').SshTransport}
+ * Real transport: local `ssh` / `scp` binaries + optional ControlMaster mux.
+ * Mux is off by default on Windows (cmd / PowerShell / Git Bash + Win32-OpenSSH).
+ * @param {{ muxDir: string, muxEnabled?: boolean }} options
+ * @returns {import('./contract.js').SshTransport & { getMuxEnabled: () => boolean }}
  */
-export function createRealTransport({ muxDir }) {
+export function createRealTransport({ muxDir, muxEnabled: muxEnabledOption } = {}) {
   mkdirSync(muxDir, { recursive: true });
+  let muxEnabled = muxEnabledOption ?? resolveMuxEnabled();
+  const muxOpts = () => ({ muxEnabled });
 
   async function exec(target, remoteCommand, {
     stdin,
@@ -74,9 +79,12 @@ export function createRealTransport({ muxDir }) {
     allowNonZero = false,
     okCodes = [],
   } = {}) {
-    const attempt = async () => spawnCaptured("ssh", sshArgs(target, remoteCommand, muxDir), { stdin, maxBytes, timeoutMs });
+    const attempt = async () => spawnCaptured("ssh", sshArgs(target, remoteCommand, muxDir, muxOpts()), { stdin, maxBytes, timeoutMs });
     let result = await attempt();
-    if (result.code !== 0 && isStaleMuxError(decodeUtf8(result.stderr))) {
+    if (result.code !== 0 && muxEnabled && isMuxUnsupportedError(decodeUtf8(result.stderr))) {
+      muxEnabled = false;
+      result = await attempt();
+    } else if (result.code !== 0 && muxEnabled && isStaleMuxError(decodeUtf8(result.stderr))) {
       clearControlSocket(target, muxDir);
       result = await attempt();
     }
@@ -93,31 +101,43 @@ export function createRealTransport({ muxDir }) {
 
     const parsed = parseTarget(target);
     const remoteSpec = `${parsed.userHost}:${remotePath}`;
-    const args = [
-      "-q",
-      "-o", "BatchMode=yes",
-      "-o", "ConnectTimeout=10",
-      ...muxOptions(target, muxDir),
-      ...(parsed.port ? ["-P", String(parsed.port)] : []),
-      ...(recursive ? ["-r"] : []),
-    ];
+
+    const buildArgs = () => {
+      const args = [
+        "-q",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        ...muxOptions(target, muxDir, { enabled: muxEnabled }),
+        ...(parsed.port ? ["-P", String(parsed.port)] : []),
+        ...(recursive ? ["-r"] : []),
+      ];
+      if (direction === "to") {
+        args.push(localPath, remoteSpec);
+      } else if (direction === "from") {
+        args.push(remoteSpec, localPath);
+      } else {
+        throw new Error('direction must be "to" (upload) or "from" (download)');
+      }
+      return args;
+    };
 
     if (direction === "to") {
       if (!existsSync(localPath)) throw new Error(`local path does not exist: ${localPath}`);
       const st = statSync(localPath);
       if (st.isDirectory() && !recursive) throw new Error("local path is a directory; set recursive=true");
       if (!st.isDirectory() && !st.isFile()) throw new Error(`local path is not a regular file/directory: ${localPath}`);
-      args.push(localPath, remoteSpec);
     } else if (direction === "from") {
       mkdirSync(dirname(localPath), { recursive: true });
-      args.push(remoteSpec, localPath);
     } else {
       throw new Error('direction must be "to" (upload) or "from" (download)');
     }
 
-    const attempt = async () => spawnCaptured("scp", args, { timeoutMs, maxBytes: MAX_TEXT_BYTES });
+    const attempt = async () => spawnCaptured("scp", buildArgs(), { timeoutMs, maxBytes: MAX_TEXT_BYTES });
     let result = await attempt();
-    if (result.code !== 0 && isStaleMuxError(decodeUtf8(result.stderr))) {
+    if (result.code !== 0 && muxEnabled && isMuxUnsupportedError(decodeUtf8(result.stderr))) {
+      muxEnabled = false;
+      result = await attempt();
+    } else if (result.code !== 0 && muxEnabled && isStaleMuxError(decodeUtf8(result.stderr))) {
       clearControlSocket(target, muxDir);
       result = await attempt();
     }
@@ -126,15 +146,24 @@ export function createRealTransport({ muxDir }) {
   }
 
   async function close(target) {
-    const { parsed, args } = baseSshOptions(target, muxDir);
+    if (!muxEnabled) {
+      return { stdout: Buffer.alloc(0), stderr: Buffer.from("multiplexing disabled\n"), code: 0, signal: null };
+    }
+    const { parsed, args } = baseSshOptions(target, muxDir, muxOpts());
     const result = await spawnCaptured("ssh", [...args, "-O", "exit", parsed.userHost], { timeoutMs: 10000 });
     clearControlSocket(target, muxDir);
     return result;
   }
 
   function spawnInteractive(target, remoteCommand) {
-    return spawn("ssh", interactiveSshArgs(target, remoteCommand, muxDir), { stdio: ["pipe", "pipe", "pipe"] });
+    return spawn("ssh", interactiveSshArgs(target, remoteCommand, muxDir, muxOpts()), { stdio: ["pipe", "pipe", "pipe"] });
   }
 
-  return { exec, scp, close, spawnInteractive };
+  return {
+    exec,
+    scp,
+    close,
+    spawnInteractive,
+    getMuxEnabled: () => muxEnabled,
+  };
 }

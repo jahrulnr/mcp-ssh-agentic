@@ -12,6 +12,56 @@ export const INTERACTIVE_MAX_SESSIONS = 8;
 export const INTERACTIVE_MAX_BUFFER_BYTES = MAX_TEXT_BYTES;
 
 /**
+ * Whether OpenSSH ControlMaster multiplexing should be used.
+ *
+ * Native Win32-OpenSSH (the client used from cmd.exe, PowerShell, and typically
+ * Git Bash when `ssh` resolves to System32/OpenSSH) does not support ControlMaster
+ * — it fails with errors like "getsockname failed: Not a socket".
+ *
+ * Override with env `MCP_SSH_AGENTIC_MUX=0|1` (also true/false/yes/no/on/off).
+ * WSL is `platform=linux` and keeps mux enabled.
+ *
+ * @param {{ platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv }} [opts]
+ */
+export function resolveMuxEnabled({ platform = process.platform, env = process.env } = {}) {
+  const raw = env.MCP_SSH_AGENTIC_MUX;
+  if (raw !== undefined && String(raw).trim() !== "") {
+    const v = String(raw).trim();
+    if (/^(0|false|no|off)$/i.test(v)) return false;
+    if (/^(1|true|yes|on)$/i.test(v)) return true;
+  }
+  return platform !== "win32";
+}
+
+/**
+ * Best-effort label for the local client environment (docs / instructions).
+ * Cursor launches Node directly, so shell is often "windows" even if the user
+ * normally works in PowerShell or Git Bash — all three share win32 + Win32-OpenSSH.
+ *
+ * @param {{ platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv }} [opts]
+ * @returns {"linux"|"darwin"|"windows-cmd"|"windows-powershell"|"windows-git-bash"|"windows"|"other"}
+ */
+export function describeLocalClient({ platform = process.platform, env = process.env } = {}) {
+  if (platform === "linux") return "linux";
+  if (platform === "darwin") return "darwin";
+  if (platform !== "win32") return "other";
+
+  // Heuristics only — Cursor/MCP usually spawn Node directly, not via the user's shell.
+  if (
+    env.MSYSTEM
+    || /\bbash\.exe\b/i.test(env.SHELL || "")
+    || /\\Git\\/i.test(env.EXEPATH || "")
+  ) {
+    return "windows-git-bash";
+  }
+  if (env.POWERSHELL_DISTRIBUTION_CHANNEL || env.PSExecutionPolicyPreference !== undefined) {
+    return "windows-powershell";
+  }
+  if (/\bcmd\.exe\b/i.test(env.ComSpec || "")) return "windows-cmd";
+  return "windows";
+}
+
+/**
  * @param {string} value
  * @returns {{ userHost: string, port?: number }}
  */
@@ -34,14 +84,27 @@ export function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-export function controlPathFor(target, muxDir) {
+/**
+ * @param {string} target
+ * @param {string} muxDir
+ * @param {{ platform?: NodeJS.Platform }} [opts]
+ */
+export function controlPathFor(target, muxDir, { platform = process.platform } = {}) {
   const parsed = parseTarget(target);
   const key = `${parsed.userHost}:${parsed.port || 22}`;
   const hash = createHash("sha256").update(key).digest("hex").slice(0, 24);
-  return join(muxDir, hash);
+  const path = join(muxDir, hash);
+  // OpenSSH ControlPath is happier with forward slashes even when forced on Windows.
+  return platform === "win32" ? path.replace(/\\/g, "/") : path;
 }
 
-export function muxOptions(target, muxDir) {
+/**
+ * @param {string} target
+ * @param {string} muxDir
+ * @param {{ enabled?: boolean }} [opts]
+ */
+export function muxOptions(target, muxDir, { enabled = true } = {}) {
+  if (!enabled) return [];
   return [
     "-o", "ControlMaster=auto",
     "-o", `ControlPath=${controlPathFor(target, muxDir)}`,
@@ -49,7 +112,12 @@ export function muxOptions(target, muxDir) {
   ];
 }
 
-export function baseSshOptions(target, muxDir) {
+/**
+ * @param {string} target
+ * @param {string} muxDir
+ * @param {{ muxEnabled?: boolean }} [opts]
+ */
+export function baseSshOptions(target, muxDir, { muxEnabled = true } = {}) {
   const parsed = parseTarget(target);
   return {
     parsed,
@@ -57,24 +125,41 @@ export function baseSshOptions(target, muxDir) {
       "-q",
       "-o", "BatchMode=yes",
       "-o", "ConnectTimeout=10",
-      ...muxOptions(target, muxDir),
+      ...muxOptions(target, muxDir, { enabled: muxEnabled }),
       ...(parsed.port ? ["-p", String(parsed.port)] : []),
     ],
   };
 }
 
-export function sshArgs(target, remoteCommand, muxDir) {
-  const { parsed, args } = baseSshOptions(target, muxDir);
+/**
+ * @param {string} target
+ * @param {string} remoteCommand
+ * @param {string} muxDir
+ * @param {{ muxEnabled?: boolean }} [opts]
+ */
+export function sshArgs(target, remoteCommand, muxDir, opts = {}) {
+  const { parsed, args } = baseSshOptions(target, muxDir, opts);
   return [...args, parsed.userHost, "--", remoteCommand];
 }
 
-export function interactiveSshArgs(target, remoteCommand, muxDir) {
-  const { parsed, args } = baseSshOptions(target, muxDir);
+/**
+ * @param {string} target
+ * @param {string} remoteCommand
+ * @param {string} muxDir
+ * @param {{ muxEnabled?: boolean }} [opts]
+ */
+export function interactiveSshArgs(target, remoteCommand, muxDir, opts = {}) {
+  const { parsed, args } = baseSshOptions(target, muxDir, opts);
   return [...args, "-tt", parsed.userHost, "--", remoteCommand];
 }
 
 export function isStaleMuxError(message) {
   return /Control socket|Connection refused|Mux|Master running|No such file or directory.*mux/i.test(message);
+}
+
+/** Errors that mean this SSH client cannot use ControlMaster at all. */
+export function isMuxUnsupportedError(message) {
+  return /getsockname failed|Not a socket|Bad file descriptor|muxserver_listen|unsupported multiplexing/i.test(message);
 }
 
 export function decodeUtf8(buffer) {

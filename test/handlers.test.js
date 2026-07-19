@@ -218,9 +218,20 @@ describe("handlers via mock transport (SSH contract)", () => {
     assert.equal(readFileSync(down, "utf8"), "via-handler\n");
   });
 
-  it("ssh_close reports closed connection", async () => {
+  it("ssh_close reports closed connection when mux is on", async () => {
     const result = await api.handlers.ssh_close({ target: TARGET });
     assert.match(textOf(result), /Closed multiplexed connection/);
+  });
+
+  it("ssh_close explains when multiplexing is disabled", async () => {
+    const { createHandlers } = await import("../src/app.js");
+    const { createMockTransport } = await import("../src/transport/mock.js");
+    const transport = createMockTransport();
+    transport.getMuxEnabled = () => false;
+    const { handlers } = createHandlers(transport);
+    const result = await handlers.ssh_close({ target: TARGET });
+    assert.match(textOf(result), /Multiplexing is disabled/);
+    transport.dispose();
   });
 
   it("ssh_interactive_exec + input for a prompting script", async () => {

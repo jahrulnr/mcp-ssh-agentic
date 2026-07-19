@@ -4,13 +4,29 @@ MCP server untuk operasi agentic melalui SSH/SCP passwordless. Server menggunaka
 
 ## Efisiensi koneksi
 
-Setiap target memakai **SSH ControlMaster** multiplexing:
+Di **Linux** dan **macOS**, setiap target memakai **SSH ControlMaster** multiplexing:
 
 - Socket: `~/.cache/mcp-ssh-agentic/mux/<hash>`
 - `ControlPersist=600` (master tetap hidup 10 menit idle)
 - Call berikutnya ke host yang sama memakai ulang TCP/auth — jauh lebih cepat daripada open/close per tool call
 - Socket stale otomatis dibersihkan + di-retry sekali
 - `ssh_close` menutup master secara eksplisit
+
+### Windows (cmd / PowerShell / Git Bash)
+
+**Win32-OpenSSH** native **tidak mendukung** ControlMaster (berlaku untuk ketiga shell Windows umum — mereka memakai `ssh.exe` yang sama). Multiplexing **dimatikan by default** di `win32`; setiap tool call membuka koneksi SSH baru. Fitur lain tetap sama.
+
+| Client | Mux default | Catatan |
+|---|---|---|
+| Windows cmd.exe | off | Win32-OpenSSH |
+| Windows PowerShell / pwsh | off | Client OpenSSH yang sama |
+| Git Bash | off | Biasanya Win32-OpenSSH di `PATH` |
+| WSL | on | Berjalan sebagai Linux — disarankan di Windows untuk reuse koneksi |
+| macOS / Linux | on | ControlMaster penuh |
+
+Jika error ControlMaster tetap muncul (misalnya setelah memaksa mux), server mematikan multiplexing untuk sisa proses dan mencoba ulang tanpa mux.
+
+Override lewat env `MCP_SSH_AGENTIC_MUX=0|1` (juga `true`/`false`/`yes`/`no`/`on`/`off`).
 
 ## Menjalankan dengan npx
 
