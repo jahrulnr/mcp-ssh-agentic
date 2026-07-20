@@ -1,6 +1,6 @@
 {
   "name": "@jahrulnr/mcp-ssh-agentic",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "MCP server for agentic passwordless SSH/SCP with ControlMaster connection reuse",
   "type": "module",
   "bin": {
