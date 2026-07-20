@@ -84,7 +84,7 @@ Targets must always be specified as `user@host[:port]`, for example `demo@127.0.
 
 ## Available Tools
 
-`ssh_ping`, `ssh_read_file`, `ssh_write_file`, `ssh_read_image`, `ssh_list_dir`, `ssh_mkdir`, `ssh_grep`, `ssh_apply_patch`, `ssh_delete`, `ssh_exec`, `ssh_interactive_exec`, `ssh_interactive_input`, `ssh_interactive_close`, `ssh_interactive_list`, `ssh_scp_to`, `ssh_scp_from`, `ssh_close`
+`ssh_ping`, `ssh_read_file`, `ssh_write_file`, `ssh_read_image`, `ssh_list_dir`, `ssh_mkdir`, `ssh_grep`, `ssh_apply_patch`, `ssh_delete`, `ssh_exec`, `ssh_exec_result`, `ssh_exec_kill`, `ssh_interactive_exec`, `ssh_interactive_input`, `ssh_interactive_close`, `ssh_interactive_list`, `ssh_scp_to`, `ssh_scp_from`, `ssh_close`
 
 Examples:
 
@@ -95,6 +95,12 @@ ssh_mkdir("demo@server", "/srv/app/releases/42")
 ssh_list_dir("demo@server", "/var/log")
 ssh_grep("demo@server", "TODO", "/srv/app", "*.js")
 ssh_exec("demo@server", "systemctl --user status my-service")
+
+# Detached / background command:
+ssh_exec("demo@server", "./build.sh", background=true)
+# -> job_id=abc123
+ssh_exec_result(job_id="abc123", wait=true, timeout_ms=60000)
+ssh_exec_kill(job_id="abc123", signal="SIGTERM", cleanup=true)
 
 # Commands that may require interactive input (sudo password, y/N prompts, setup wizards):
 ssh_interactive_exec("demo@server", "sudo apt-get upgrade")
@@ -115,7 +121,8 @@ ssh_close("demo@server")
 - `ssh_delete` uses `rm -f` for files and `rm -rf` only when `recursive=true`.
 - `ssh_write_file` writes or overwrites a remote file directly from text (without creating a temporary local file). Use `append=true` to append instead of overwrite. Parent directories are created automatically unless `create_dirs=false`.
 - `ssh_mkdir` is equivalent to `mkdir -p` on the remote host, which is especially useful before `ssh_scp_to`, since `scp` does not automatically create remote parent directories.
-- `ssh_exec` has a default timeout of 30 seconds and a maximum output size of 5 MiB. `ssh_read_image` supports files up to 20 MiB. `ssh_write_file` accepts content up to 5 MiB. SCP operations default to a 120-second timeout.
+- `ssh_exec` has a default timeout of 30 seconds and a maximum output size of 5 MiB. `ssh_read_image` supports files up to 20 MiB. `ssh_write_file` accepts content up to 5 MiB. SCP operations default to a 120-second timeout. `ssh_exec` also accepts `cwd`, `env`, `ok_codes`, and `max_output_bytes`.
+- Set `background=true` on `ssh_exec` to run a command detached and get a `job_id`. Use `ssh_exec_result` to poll or wait, and `ssh_exec_kill` to stop or clean up the job log directory.
 - All remote commands (not just `ssh_exec`) run through a **non-login, non-interactive shell** (`bash --noprofile --norc -c`, falling back to `sh -c`). This avoids failures caused by broken `/etc/profile.d` scripts on some servers and ensures consistent behavior across all tools. `ssh_exec` always returns `exit_code=N` along with stdout. If stderr is present, it is included in a `[stderr]` section. Non-zero exit codes set `isError`, but stdout is still returned.
 - **Interactive sessions (TTY/PTY):** `ssh_interactive_exec` forces PTY allocation on the remote side (`ssh -tt`), allowing programs that require a real terminal (`sudo`, `passwd`, confirmation prompts, setup wizards, REPLs, etc.) to behave correctly even though the local side uses ordinary pipes. The server waits until output has been quiet for `quiet_ms` (default: 500 ms) or the process exits, then returns the collected output along with a `session_id`. Continue the session using `ssh_interactive_input` (leave `input` empty to simply wait for more output without sending anything). This mechanism is based on output inactivity rather than prompt detection. Commands that continuously produce output (such as long build logs) may cause the tool call to wait longer depending on `quiet_ms` and `maxWaitMs`. The server allows up to 8 concurrent interactive sessions, automatically cleans up sessions after 10 minutes of inactivity, and terminates all active sessions when the server exits. Use `ssh_interactive_list` to view active sessions and `ssh_interactive_close` to close them manually.
 - `ssh_grep` treats "no matches" as a successful result and still returns partial matches even if some paths cannot be read.
