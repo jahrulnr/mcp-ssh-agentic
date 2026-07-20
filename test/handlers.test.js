@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createHandlers } from "../src/app.js";
 import { createJobManager } from "../src/jobs.js";
@@ -17,8 +17,8 @@ function textOf(result) {
 
 describe("resolveRemotePath", () => {
   it("maps absolute remote paths under the sandbox root", () => {
-    assert.equal(resolveRemotePath("/tmp/root", "/etc/hostname"), "/tmp/root/etc/hostname");
-    assert.equal(resolveRemotePath("/tmp/root", "rel"), "/tmp/root/rel");
+    assert.equal(resolveRemotePath("/tmp/root", "/etc/hostname"), resolve("/tmp/root", "etc/hostname"));
+    assert.equal(resolveRemotePath("/tmp/root", "rel"), resolve("/tmp/root", "rel"));
   });
 
   it("rejects path escape", () => {

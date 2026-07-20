@@ -17,8 +17,8 @@
     "test": "node --test test/*.test.js",
     "test:unit": "npm test",
     "test:mcp": "npm run test:mcp:node && npm run test:mcp:npx",
-    "test:mcp:node": "MCP_SMOKE_MODE=node node test/mcp-smoke.mjs",
-    "test:mcp:npx": "MCP_SMOKE_MODE=npx node test/mcp-smoke.mjs",
+    "test:mcp:node": "node test/mcp-smoke.mjs node",
+    "test:mcp:npx": "node test/mcp-smoke.mjs npx",
     "test:all": "npm run check && npm run test:unit && npm run test:mcp"
   },
   "engines": {

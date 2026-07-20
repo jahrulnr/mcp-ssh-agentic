@@ -11,7 +11,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { isAbsolute as isPosixAbsolute } from "node:path/posix";
 import { MAX_TEXT_BYTES, formatFailure, parseTarget } from "../util.js";
 import { spawnCaptured } from "./real.js";
 
@@ -25,9 +26,12 @@ import { spawnCaptured } from "./real.js";
 export function resolveRemotePath(remoteRoot, remotePath) {
   if (!remotePath) throw new Error("remote path is required");
   if (remotePath.includes("\0")) throw new Error("paths must not contain NUL");
-  const cleaned = remotePath.replace(/^\/+/, "");
-  const abs = resolve(remoteRoot, isAbsolute(remotePath) ? cleaned : remotePath);
-  if (abs !== remoteRoot && !abs.startsWith(remoteRoot + "/") && !abs.startsWith(remoteRoot + "\\")) {
+  const localRoot = resolve(remoteRoot);
+  const isAbs = isPosixAbsolute(remotePath);
+  const cleaned = isAbs ? remotePath.replace(/^\/+/, "") : remotePath;
+  const abs = join(localRoot, cleaned);
+  const prefix = localRoot.toLowerCase() + sep.toLowerCase();
+  if (abs.toLowerCase() !== localRoot.toLowerCase() && !abs.toLowerCase().startsWith(prefix)) {
     throw new Error(`path escapes mock remote root: ${remotePath}`);
   }
   return abs;
@@ -57,17 +61,30 @@ export function createMockTransport({
   // still sees id/hostname — shell functions would not survive the inner bash.
   const binDir = join(root, ".mock-bin");
   mkdirSync(binDir, { recursive: true });
-  writeFileSync(join(binDir, "id"), `#!/bin/sh\nif [ "$1" = "-u" ]; then printf '%s\\n' '${identity.uid}'; else command -p id "$@"; fi\n`);
-  writeFileSync(join(binDir, "hostname"), `#!/bin/sh\nprintf '%s\\n' '${identity.hostname}'\n`);
+  const uid = identity.uid ?? "1000";
+  const host = identity.hostname ?? "mock-host";
+  writeFileSync(join(binDir, "id"), `#!/bin/sh\nif [ "$1" = "-u" ]; then printf '%s\\n' '${uid}'; else command -p id "$@"; fi\n`);
+  writeFileSync(join(binDir, "hostname"), `#!/bin/sh\nprintf '%s\\n' '${host}'\n`);
   chmodSync(join(binDir, "id"), 0o755);
   chmodSync(join(binDir, "hostname"), 0o755);
 
+  // BASH_ENV works on Windows too, where chmod does not grant an exec bit.
+  const bashEnvPath = join(binDir, ".bash_env");
+  writeFileSync(
+    bashEnvPath,
+    `id() { printf '%s\\n' '${uid}'; }\n` +
+    `hostname() { printf '%s\\n' '${host}'; }\n` +
+    `export -f id hostname\n`,
+  );
+
+  const pathSep = process.platform === "win32" ? ";" : ":";
   const env = {
     ...process.env,
     HOME: root,
     USER: "mock",
     LOGNAME: "mock",
-    PATH: `${binDir}:${process.env.PATH || "/usr/bin:/bin"}`,
+    PATH: `${binDir}${pathSep}${process.env.PATH || "/usr/bin:/bin"}`,
+    BASH_ENV: bashEnvPath.replace(/\\/g, "/"),
   };
 
   /**

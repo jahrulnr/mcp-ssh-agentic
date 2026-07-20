@@ -17,7 +17,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const mode = process.env.MCP_SMOKE_MODE || "node";
+const mode = process.argv[2] || process.env.MCP_SMOKE_MODE || "node";
 const TARGET = "demo@mock-host:22";
 
 function textOf(result) {
