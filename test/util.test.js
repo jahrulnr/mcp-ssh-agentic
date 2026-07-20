@@ -10,7 +10,10 @@ import {
   isStaleMuxError,
   muxOptions,
   parseTarget,
+  remoteApplyPatchCommand,
+  remoteGrepCommand,
   remoteListDirCommand,
+  remoteReadFileCommand,
   remoteShellCommand,
   resolveMuxEnabled,
   scpRemoteSpec,
@@ -68,12 +71,83 @@ describe("remoteShellCommand", () => {
 });
 
 describe("remoteListDirCommand", () => {
-  it("prefers GNU find -printf with a BSD/POSIX fallback", () => {
+  it("uses ls -lAh for metadata-rich listing", () => {
     const cmd = remoteListDirCommand("/tmp/listed");
-    assert.match(cmd, /find --version/);
-    assert.match(cmd, /-printf/);
-    assert.match(cmd, /stat -f/);
+    assert.match(cmd, /LC_ALL=C ls -lAh --/);
     assert.match(cmd, /\/tmp\/listed/);
+  });
+});
+
+describe("remoteReadFileCommand", () => {
+  it("reads whole file by default", () => {
+    assert.match(remoteReadFileCommand("/tmp/x"), /cat -- '\/tmp\/x'/);
+  });
+
+  it("limits line count from the start", () => {
+    assert.match(remoteReadFileCommand("/tmp/x", 1, 50), /head -n 50/);
+  });
+
+  it("starts from an offset", () => {
+    assert.match(remoteReadFileCommand("/tmp/x", 10, 0), /tail -n \+10/);
+  });
+
+  it("combines offset and limit", () => {
+    const cmd = remoteReadFileCommand("/tmp/x", 5, 20);
+    assert.match(cmd, /tail -n \+5 \| head -n 20/);
+  });
+
+  it("treats offset 0 as 1", () => {
+    assert.match(remoteReadFileCommand("/tmp/x", 0, 10), /head -n 10/);
+  });
+});
+
+describe("remoteGrepCommand", () => {
+  it("prefers rg and formats file:line:match", () => {
+    const cmd = remoteGrepCommand({ pattern: "TODO", path: "/src" });
+    assert.match(cmd, /rg --no-heading -n --hidden --no-messages --/);
+    assert.match(cmd, /TODO/);
+    assert.match(cmd, /\/src/);
+  });
+
+  it("adds ripgrep option flags", () => {
+    const cmd = remoteGrepCommand({
+      pattern: "foo",
+      path: "/src",
+      glob: "*.js",
+      ignoreCase: true,
+      fixedStrings: true,
+      wordRegexp: true,
+      invert: true,
+      maxResults: 10,
+    });
+    assert.match(cmd, /--glob '\*\.js'/);
+    assert.match(cmd, /-i -F -w -v -m 10/);
+  });
+
+  it("falls back to grep", () => {
+    const cmd = remoteGrepCommand({ pattern: "TODO", path: "/src", glob: "*.js", ignoreCase: true });
+    assert.match(cmd, /grep -RIn/);
+    assert.match(cmd, /--include='\*\.js'/);
+    assert.match(cmd, /-i/);
+  });
+});
+
+describe("remoteApplyPatchCommand", () => {
+  it("includes apply_patch and patch -p0 for strip=0", () => {
+    const cmd = remoteApplyPatchCommand();
+    assert.match(cmd, /apply_patch/);
+    assert.match(cmd, /patch -p0/);
+  });
+
+  it("supports strip level", () => {
+    const cmd = remoteApplyPatchCommand({ strip: 1 });
+    assert.match(cmd, /git apply -p1/);
+    assert.doesNotMatch(cmd, /apply_patch/);
+  });
+
+  it("supports dry-run", () => {
+    const cmd = remoteApplyPatchCommand({ dry_run: true });
+    assert.match(cmd, /git apply --check/);
   });
 });
 

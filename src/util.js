@@ -224,42 +224,130 @@ export function remoteShellCommand(command) {
 }
 
 /**
- * List a remote directory with type/size/mtime/path.
- * Uses GNU find -printf when available; otherwise a BSD/POSIX-friendly fallback
- * (needed for macOS clients running the mock transport, and macOS remotes).
+ * List a remote directory with metadata in `ls -lAh` style.
+ * `ls` is POSIX-ubiquitous, so this works on GNU, BSD/macOS, and busybox.
  * @param {string} path
  */
 export function remoteListDirCommand(path) {
+  return `LC_ALL=C ls -lAh -- ${shellQuote(path)}`;
+}
+
+/**
+ * Read a remote text file with optional line offset/limit.
+ * @param {string} path
+ * @param {number} [offset] 1-based starting line (0 is treated as 1)
+ * @param {number} [limit] number of lines; 0 means unlimited
+ */
+export function remoteReadFileCommand(path, offset = 1, limit = 0) {
   const p = shellQuote(path);
+  const start = Math.max(1, Math.floor(offset || 1));
+  if (start === 1 && limit === 0) return `cat -- ${p}`;
+  if (start === 1) return `set -o pipefail; cat -- ${p} | head -n ${limit}`;
+  if (limit === 0) return `cat -- ${p} | tail -n +${start}`;
+  return `set -o pipefail; cat -- ${p} | tail -n +${start} | head -n ${limit}`;
+}
+
+/**
+ * Build a ripgrep/grep remote command string.
+ * @param {object} opts
+ * @param {string} opts.pattern
+ * @param {string} [opts.path]
+ * @param {string} [opts.glob]
+ * @param {boolean} [opts.ignoreCase]
+ * @param {boolean} [opts.fixedStrings]
+ * @param {boolean} [opts.wordRegexp]
+ * @param {boolean} [opts.invert]
+ * @param {number} [opts.maxResults]
+ */
+export function remoteGrepCommand({
+  pattern,
+  path = ".",
+  glob,
+  ignoreCase = false,
+  fixedStrings = false,
+  wordRegexp = false,
+  invert = false,
+  maxResults,
+} = {}) {
+  const qPattern = shellQuote(pattern);
+  const qPath = shellQuote(path);
+  const rgParts = ["--no-heading -n --hidden --no-messages"];
+  const grepParts = ["-RIn --exclude-dir=.git --exclude-dir=node_modules"];
+  if (glob) {
+    rgParts.push(`--glob ${shellQuote(glob)}`);
+    grepParts.push(`--include=${shellQuote(glob)}`);
+  }
+  if (ignoreCase) { rgParts.push("-i"); grepParts.push("-i"); }
+  if (fixedStrings) { rgParts.push("-F"); grepParts.push("-F"); }
+  if (wordRegexp) { rgParts.push("-w"); grepParts.push("-w"); }
+  if (invert) { rgParts.push("-v"); grepParts.push("-v"); }
+  if (maxResults) {
+    const n = Number(maxResults);
+    rgParts.push(`-m ${n}`);
+    grepParts.push(`-m ${n}`);
+  }
+  rgParts.push("--");
+  grepParts.push("--");
   return [
-    "set -e",
-    `path=${p}`,
-    "if find --version >/dev/null 2>&1; then",
-    "  find \"$path\" -maxdepth 1 -mindepth 1 -printf '%y\\t%s\\t%TY-%Tm-%Td %TH:%TM:%TS\\t%p\\n' | sort",
+    "set +e",
+    "if command -v rg >/dev/null 2>&1; then",
+    `  out=$(rg ${rgParts.join(" ")} ${qPattern} ${qPath} 2>/dev/null)`,
+    "  ec=$?",
     "else",
-    "  find \"$path\" -maxdepth 1 -mindepth 1 | sort | while IFS= read -r entry; do",
-    "    if [ -L \"$entry\" ]; then t=l",
-    "    elif [ -d \"$entry\" ]; then t=d",
-    "    elif [ -f \"$entry\" ]; then t=f",
-    "    elif [ -b \"$entry\" ]; then t=b",
-    "    elif [ -c \"$entry\" ]; then t=c",
-    "    elif [ -p \"$entry\" ]; then t=p",
-    "    elif [ -S \"$entry\" ]; then t=s",
-    "    else t=u",
-    "    fi",
-    "    if [ -f \"$entry\" ] && [ ! -L \"$entry\" ]; then",
-    "      s=$(wc -c < \"$entry\" | tr -d '[:space:]')",
-    "    else",
-    "      s=0",
-    "    fi",
-    "    m=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' \"$entry\" 2>/dev/null || true)",
-    "    if [ -z \"$m\" ]; then",
-    "      m=$(stat -c '%y' \"$entry\" 2>/dev/null | cut -c1-19 || echo '?')",
-    "    fi",
-    "    printf '%s\\t%s\\t%s\\t%s\\n' \"$t\" \"$s\" \"$m\" \"$entry\"",
-    "  done",
+    `  out=$(grep ${grepParts.join(" ")} ${qPattern} ${qPath} 2>/dev/null)`,
+    "  ec=$?",
     "fi",
+    "printf '%s' \"$out\"",
+    "if [ \"$ec\" -eq 0 ] || [ \"$ec\" -eq 1 ]; then exit 0; fi",
+    "if [ -n \"$out\" ]; then exit 0; fi",
+    "exit \"$ec\"",
   ].join("\n");
+}
+
+/**
+ * Build a remote patch command supporting strip level and dry-run.
+ * @param {object} opts
+ * @param {number} [opts.strip]
+ * @param {boolean} [opts.dry_run]
+ */
+export function remoteApplyPatchCommand({ strip = 0, dry_run = false } = {}) {
+  const p = Number(strip) || 0;
+  const header = [
+    "tmpfile=$(mktemp)",
+    "cat > \"$tmpfile\"",
+  ];
+  if (dry_run) {
+    return [
+      ...header,
+      "if command -v git >/dev/null 2>&1; then",
+      `  git apply --check -p${p} "$tmpfile" 2>/dev/null && { rm -f \"$tmpfile\"; exit 0; }`,
+      "fi",
+      "if command -v patch >/dev/null 2>&1; then",
+      `  patch --dry-run -p${p} < "$tmpfile" 2>/dev/null && { rm -f \"$tmpfile\"; exit 0; }`,
+      "fi",
+      'rm -f "$tmpfile"',
+      'echo "dry-run not supported: neither git apply --check nor patch --dry-run is available" >&2; exit 2',
+    ].join("\n");
+  }
+  const lines = [...header];
+  if (p === 0) {
+    lines.push(
+      "if command -v apply_patch >/dev/null 2>&1; then",
+      '  apply_patch < "$tmpfile" && { rm -f "$tmpfile"; exit 0; }',
+      "fi",
+    );
+  }
+  lines.push(
+    "if command -v git >/dev/null 2>&1; then",
+    `  git apply -p${p} "$tmpfile" 2>/dev/null && { rm -f \"$tmpfile\"; exit 0; }`,
+    "fi",
+    "if command -v patch >/dev/null 2>&1; then",
+    `  patch -p${p} < "$tmpfile" && { rm -f \"$tmpfile\"; exit 0; }`,
+    "fi",
+    'rm -f "$tmpfile"',
+    '  echo "no patch tool found" >&2; exit 2',
+  );
+  return lines.join("\n");
 }
 
 export function formatBytes(n) {

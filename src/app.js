@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createJobManager } from "./jobs.js";
 import {
   INTERACTIVE_MAX_SESSIONS,
   INTERACTIVE_QUIET_MS_DEFAULT,
@@ -17,7 +18,10 @@ import {
   formatBytes,
   formatFailure,
   parseTarget,
+  remoteApplyPatchCommand,
+  remoteGrepCommand,
   remoteListDirCommand,
+  remoteReadFileCommand,
   remoteShellCommand,
   resolveMuxEnabled,
   safe,
@@ -30,10 +34,11 @@ const SUPPORTS_PROCESS_GROUPS = process.platform !== "win32";
 
 /**
  * @param {import('./transport/contract.js').SshTransport} transport
- * @param {{ interactiveSessions?: Map<string, object>, now?: () => number, randomId?: () => string }} [opts]
+ * @param {{ interactiveSessions?: Map<string, object>, jobManager?: import('./jobs.js').JobManager, now?: () => number, randomId?: () => string }} [opts]
  */
 export function createHandlers(transport, {
   interactiveSessions = new Map(),
+  jobManager = createJobManager(),
   now = () => Date.now(),
   randomId = () => randomUUID(),
 } = {}) {
@@ -72,8 +77,8 @@ export function createHandlers(transport, {
       return textResult(decodeUtf8(result.stdout).trim());
     }),
 
-    ssh_read_file: async ({ target, path }) => safe(async () => {
-      const result = await transport.exec(target, remoteShellCommand(`cat -- ${shellQuote(path)}`));
+    ssh_read_file: async ({ target, path, offset = 1, limit = 200 }) => safe(async () => {
+      const result = await transport.exec(target, remoteShellCommand(remoteReadFileCommand(path, offset, limit)));
       return textResult(decodeUtf8(result.stdout));
     }),
 
@@ -105,23 +110,17 @@ export function createHandlers(transport, {
       return textResult(decodeUtf8(result.stdout));
     }),
 
-    ssh_grep: async ({ target, pattern, path = ".", glob }) => safe(async () => {
-      const globArg = glob ? `--glob ${shellQuote(glob)}` : "";
-      const remote = [
-        "set +e",
-        "if command -v rg >/dev/null 2>&1; then",
-        `  out=$(rg -n --hidden --no-messages ${globArg} -- ${shellQuote(pattern)} ${shellQuote(path)} 2>/dev/null)`,
-        "  ec=$?",
-        "else",
-        `  out=$(grep -RIn --exclude-dir=.git --exclude-dir=node_modules ${shellQuote(pattern)} ${shellQuote(path)} 2>/dev/null)`,
-        "  ec=$?",
-        "fi",
-        "printf '%s' \"$out\"",
-        "if [ \"$ec\" -eq 0 ] || [ \"$ec\" -eq 1 ]; then exit 0; fi",
-        "if [ -n \"$out\" ]; then exit 0; fi",
-        "exit \"$ec\"",
-      ].join("\n");
-
+    ssh_grep: async ({ target, pattern, path = ".", glob, ignore_case = false, fixed_strings = false, word_regexp = false, invert = false, max_results }) => safe(async () => {
+      const remote = remoteGrepCommand({
+        pattern,
+        path,
+        glob,
+        ignoreCase: ignore_case,
+        fixedStrings: fixed_strings,
+        wordRegexp: word_regexp,
+        invert,
+        maxResults: max_results,
+      });
       const result = await transport.exec(target, remoteShellCommand(remote), { maxBytes: MAX_TEXT_BYTES, allowNonZero: true });
       const stdout = decodeUtf8(result.stdout);
       const stderr = decodeUtf8(result.stderr).trim();
@@ -134,9 +133,9 @@ export function createHandlers(transport, {
       throw new Error(formatFailure(result));
     }),
 
-    ssh_apply_patch: async ({ target, patch }) => safe(async () => {
-      const result = await transport.exec(target, remoteShellCommand("if command -v apply_patch >/dev/null 2>&1; then apply_patch; else patch -p0; fi"), { stdin: patch, maxBytes: MAX_TEXT_BYTES });
-      return textResult(decodeUtf8(result.stdout) || "Patch applied successfully.");
+    ssh_apply_patch: async ({ target, patch, strip = 0, dry_run = false }) => safe(async () => {
+      const result = await transport.exec(target, remoteShellCommand(remoteApplyPatchCommand({ strip, dry_run })), { stdin: patch, maxBytes: MAX_TEXT_BYTES });
+      return textResult(decodeUtf8(result.stdout) || (dry_run ? "Patch dry-run succeeded." : "Patch applied successfully."));
     }),
 
     ssh_delete: async ({ target, path, recursive = false }) => safe(async () => {
@@ -145,17 +144,60 @@ export function createHandlers(transport, {
       return textResult(`Deleted ${path}${recursive ? " recursively" : ""}.`);
     }),
 
-    ssh_exec: async ({ target, command, timeout_ms = 30000 }) => safe(async () => {
-      const result = await transport.exec(target, remoteShellCommand(command), {
+    ssh_exec: async ({ target, command, timeout_ms = 30000, stdin, max_output_bytes = MAX_TEXT_BYTES, ok_codes = [], cwd, env, background = false }) => safe(async () => {
+      if (background && stdin !== undefined) {
+        throw new Error("stdin is not supported for background jobs");
+      }
+      let inner = command;
+      if (cwd) inner = `cd -- ${shellQuote(cwd)} && ${inner}`;
+      if (env) {
+        const exports = Object.entries(env)
+          .map(([k, v]) => {
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`invalid environment variable name: ${k}`);
+            return `export ${k}=${shellQuote(v)}`;
+          })
+          .join("; ");
+        if (exports) inner = `${exports}; ${inner}`;
+      }
+      const remoteCommand = remoteShellCommand(inner);
+      if (background) {
+        const child = transport.spawnBackground(target, remoteCommand);
+        const job = await jobManager.start({ target, command, cwd, env, child });
+        return textResult(`job_id=${job.id}\nstatus=started\ncommand=${command}`);
+      }
+      const result = await transport.exec(target, remoteCommand, {
+        stdin,
+        maxBytes: max_output_bytes,
         timeoutMs: timeout_ms,
-        maxBytes: MAX_TEXT_BYTES,
         allowNonZero: true,
       });
       const stdout = decodeUtf8(result.stdout);
       const stderr = decodeUtf8(result.stderr);
       const code = result.code ?? 1;
+      const okSet = new Set([0, ...ok_codes]);
       const body = combineStreams(stdout, stderr);
-      return textResult(`exit_code=${code}\n${body}`, { isError: code !== 0 });
+      return textResult(`exit_code=${code}\n${body}`, { isError: !okSet.has(code) });
+    }),
+
+    ssh_exec_result: async ({ job_id, wait = false, timeout_ms = 10000 }) => safe(async () => {
+      const res = await jobManager.getResult(job_id, { wait, timeoutMs: timeout_ms });
+      if (!res) throw new Error(`no background job with id ${job_id}`);
+      const parts = [`job_id=${res.id || job_id}`, `status=${res.status}`];
+      if (res.status === "exited" || res.status === "error" || res.exitCode !== undefined) {
+        parts.push(`exit_code=${res.exitCode ?? ""}`);
+      }
+      if (res.signal) parts.push(`signal=${res.signal}`);
+      if (res.error) parts.push(`error=${res.error}`);
+      if (res.timedOut) parts.push("timed_out=true");
+      parts.push(`stdout:\n${res.stdout || ""}`);
+      parts.push(`stderr:\n${res.stderr || ""}`);
+      return textResult(parts.join("\n"));
+    }),
+
+    ssh_exec_kill: async ({ job_id, signal = "SIGTERM", cleanup = false }) => safe(async () => {
+      const r = await jobManager.kill(job_id, signal, cleanup);
+      if (!r.found) throw new Error(`no background job with id ${job_id}`);
+      return textResult(`job_id=${job_id}\nfound=true\nkilled=${r.killed}\ncleaned=${r.cleaned}`);
     }),
 
     ssh_interactive_exec: async ({ target, command, quiet_ms = INTERACTIVE_QUIET_MS_DEFAULT }) => safe(async () => {
@@ -264,16 +306,17 @@ export function createHandlers(transport, {
     }),
   };
 
-  return { handlers, interactiveSessions, pruneStaleSessions, killAllInteractiveSessions };
+  return { handlers, interactiveSessions, pruneStaleSessions, killAllInteractiveSessions, jobManager };
 }
 
 /**
  * Build an MCP server with the given transport (real or mock).
  * @param {import('./transport/contract.js').SshTransport} transport
- * @param {{ version?: string }} [meta]
+ * @param {{ version?: string, jobManager?: import('./jobs.js').JobManager }} [meta]
  */
-export function createApp(transport, { version = "0.4.0" } = {}) {
-  const { handlers, interactiveSessions, pruneStaleSessions, killAllInteractiveSessions } = createHandlers(transport);
+export function createApp(transport, { version = "0.4.0", jobManager } = {}) {
+  const { handlers, interactiveSessions, pruneStaleSessions, killAllInteractiveSessions, jobManager: createdJobManager } = createHandlers(transport, { jobManager });
+  const finalJobManager = jobManager || createdJobManager;
 
   const target = z.string().describe("SSH target in the form user@host[:port]. Uses the local SSH config and keys.");
   const path = z.string().min(1).describe("Absolute or relative path on the remote host.");
@@ -296,7 +339,7 @@ export function createApp(transport, { version = "0.4.0" } = {}) {
       muxInstructions,
       "Do not assume a command succeeded unless its tool result says so.",
       "All remote commands run inside a non-login, non-interactive shell (bash --noprofile --norc, or sh) so broken /etc/profile.d scripts cannot corrupt output.",
-      "ssh_exec reports exit_code and may include [stderr]; non-zero exits set isError but still return stdout.",
+      "ssh_exec reports exit_code and may include [stderr]; non-zero exits set isError but still return stdout. Set background=true to run a command detached and get a job_id; use ssh_exec_result to poll/wait and ssh_exec_kill to stop or clean it up.",
       "ssh_write_file writes text content directly to a remote file (no local temp file needed); ssh_mkdir creates remote directories.",
       "For commands that may prompt for input (sudo password, y/N confirmations, wizards, REPLs), use ssh_interactive_exec (allocates a remote PTY) followed by ssh_interactive_input to reply or poll; close sessions with ssh_interactive_close when done.",
       "ssh_scp_to uploads local→remote; ssh_scp_from downloads remote→local.",
@@ -304,7 +347,12 @@ export function createApp(transport, { version = "0.4.0" } = {}) {
   });
 
   server.tool("ssh_ping", "Test passwordless SSH connectivity and return the remote identity.", { target }, handlers.ssh_ping);
-  server.tool("ssh_read_file", "Read a UTF-8 text file from a remote host.", { target, path }, handlers.ssh_read_file);
+  server.tool("ssh_read_file", "Read a UTF-8 text file from a remote host. offset and limit select a 1-based line range; limit=0 means unlimited. Defaults to first 200 lines.", {
+    target,
+    path,
+    offset: z.number().int().min(0).default(1).describe("1-based starting line (0 is treated as 1)."),
+    limit: z.number().int().min(0).default(200).describe("Maximum number of lines to return; 0 means unlimited."),
+  }, handlers.ssh_read_file);
   server.tool("ssh_write_file", "Write UTF-8 text content directly to a file on the remote host (creates or overwrites; use append=true to append instead). Avoids the round-trip of writing a local temp file and scp-ing it.", {
     target, path,
     content: z.string().describe("Text content to write to the remote file."),
@@ -313,17 +361,46 @@ export function createApp(transport, { version = "0.4.0" } = {}) {
   }, handlers.ssh_write_file);
   server.tool("ssh_mkdir", "Create a directory (and parents) on the remote host, equivalent to mkdir -p.", { target, path }, handlers.ssh_mkdir);
   server.tool("ssh_read_image", "Read a remote image and return it as an MCP image. Supports common raster formats.", { target, path }, handlers.ssh_read_image);
-  server.tool("ssh_list_dir", "List a remote directory with file metadata.", { target, path: path.default(".") }, handlers.ssh_list_dir);
-  server.tool("ssh_grep", "Search remote text files recursively with ripgrep, falling back to grep.", {
-    target, pattern: z.string().min(1), path: path.default("."), glob: z.string().optional(),
+  server.tool("ssh_list_dir", "List a remote directory with file metadata in ls -lAh style.", { target, path: path.default(".") }, handlers.ssh_list_dir);
+  server.tool("ssh_grep", "Search remote text files recursively with ripgrep, falling back to grep. Output format is file:line:match.", {
+    target,
+    pattern: z.string().min(1),
+    path: path.default("."),
+    glob: z.string().optional().describe("File glob to restrict search (e.g. '*.js')."),
+    ignore_case: z.boolean().default(false).describe("Case-insensitive matching (-i)."),
+    fixed_strings: z.boolean().default(false).describe("Treat pattern as a literal string (-F)."),
+    word_regexp: z.boolean().default(false).describe("Match whole words only (-w)."),
+    invert: z.boolean().default(false).describe("Invert match, returning lines that do NOT match (-v)."),
+    max_results: z.number().int().min(1).optional().describe("Stop reading each file after this many matches (-m)."),
   }, handlers.ssh_grep);
-  server.tool("ssh_apply_patch", "Apply a unified diff on the remote host using apply_patch, or patch as fallback.", { target, patch: z.string().min(1) }, handlers.ssh_apply_patch);
+  server.tool("ssh_apply_patch", "Apply a unified diff on the remote host. Tries apply_patch (strip=0 only), then git apply, then patch. Supports dry-run and strip level.", {
+    target,
+    patch: z.string().min(1).describe("Unified diff to apply."),
+    strip: z.number().int().min(0).default(0).describe("Number of leading path components to strip (-p<N>)."),
+    dry_run: z.boolean().default(false).describe("Simulate the patch application without changing files."),
+  }, handlers.ssh_apply_patch);
   server.tool("ssh_delete", "Delete a remote file or directory. Directories require recursive=true.", { target, path, recursive: z.boolean().default(false) }, handlers.ssh_delete);
-  server.tool("ssh_exec", "Execute an intentional shell command on the remote host.", {
+  server.tool("ssh_exec", "Execute an intentional shell command on the remote host. Supports stdin, cwd, env, custom output limit, and acceptable exit codes. Set background=true to run a command detached and get a job_id; stdin is not allowed for background jobs. Use ssh_exec_result to poll/wait and ssh_exec_kill to stop or clean up.", {
     target,
     command: z.string().min(1),
-    timeout_ms: z.number().int().min(1000).max(300000).default(30000),
+    timeout_ms: z.number().int().min(1000).max(300000).default(30000).describe("Timeout for non-background executions."),
+    stdin: z.string().optional().describe("Text to write to the command's stdin. Not allowed when background=true."),
+    max_output_bytes: z.number().int().min(1).max(50 * 1024 * 1024).default(MAX_TEXT_BYTES).describe("Maximum stdout/stderr bytes to capture for non-background executions."),
+    ok_codes: z.array(z.number().int()).default([]).describe("Exit codes to treat as success in addition to 0."),
+    cwd: z.string().min(1).optional().describe("Working directory on the remote host."),
+    env: z.record(z.string()).optional().describe("Extra environment variables for the command."),
+    background: z.boolean().default(false).describe("Run the command detached and return a job_id instead of waiting for completion."),
   }, handlers.ssh_exec);
+  server.tool("ssh_exec_result", "Check the status and output of a background job started with ssh_exec background=true. Optionally wait until it exits.", {
+    job_id: z.string().min(1).describe("The job_id returned by ssh_exec background=true."),
+    wait: z.boolean().default(false).describe("Block until the job exits or the timeout is reached."),
+    timeout_ms: z.number().int().min(1000).max(300000).default(10000).describe("Maximum time to wait when wait=true."),
+  }, handlers.ssh_exec_result);
+  server.tool("ssh_exec_kill", "Send a signal to a background job started with ssh_exec background=true. Optionally remove the job log directory.", {
+    job_id: z.string().min(1).describe("The job_id returned by ssh_exec background=true."),
+    signal: z.string().default("SIGTERM").describe("Signal name or number to send to the process group (e.g. SIGTERM, SIGKILL)."),
+    cleanup: z.boolean().default(false).describe("Remove the job log directory after signaling."),
+  }, handlers.ssh_exec_kill);
   server.tool("ssh_interactive_exec", "Start a command on the remote host with a PTY allocated, for programs that prompt for input (sudo asking for a password, y/N confirmations, setup wizards, REPLs). Waits until output goes quiet (likely waiting for input) or the process exits, then returns the output so far plus a session_id. If the command finishes without prompting, the session is closed automatically and there is nothing further to do. Otherwise, use ssh_interactive_input to reply or poll, and ssh_interactive_close when finished. Idle sessions auto-expire after 10 minutes.", {
     target,
     command: z.string().min(1),
@@ -353,14 +430,18 @@ export function createApp(transport, { version = "0.4.0" } = {}) {
   }, handlers.ssh_scp_from);
   server.tool("ssh_close", "Close the multiplexed SSH master connection for a target (no-op when multiplexing is disabled, e.g. native Windows OpenSSH).", { target }, handlers.ssh_close);
 
-  const pruneTimer = setInterval(pruneStaleSessions, 60000);
+  const pruneTimer = setInterval(() => {
+    pruneStaleSessions();
+    finalJobManager.cleanupOldJobs();
+  }, 60000);
   if (typeof pruneTimer.unref === "function") pruneTimer.unref();
 
   function dispose() {
     clearInterval(pruneTimer);
     killAllInteractiveSessions();
+    finalJobManager.killAll("SIGTERM");
     if (typeof transport.dispose === "function") transport.dispose();
   }
 
-  return { server, handlers, interactiveSessions, dispose, pruneStaleSessions, killAllInteractiveSessions };
+  return { server, handlers, interactiveSessions, dispose, pruneStaleSessions, killAllInteractiveSessions, jobManager: finalJobManager };
 }

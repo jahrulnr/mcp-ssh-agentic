@@ -165,11 +165,19 @@ export function createRealTransport({ muxDir, muxEnabled: muxEnabledOption } = {
     return spawn("ssh", interactiveSshArgs(target, remoteCommand, muxDir, muxOpts()), { stdio: ["pipe", "pipe", "pipe"] });
   }
 
+  function spawnBackground(target, remoteCommand) {
+    return spawn("ssh", sshArgs(target, remoteCommand, muxDir, muxOpts()), {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+  }
+
   return {
     exec,
     scp,
     close,
     spawnInteractive,
+    spawnBackground,
     getMuxEnabled: () => muxEnabled,
   };
 }

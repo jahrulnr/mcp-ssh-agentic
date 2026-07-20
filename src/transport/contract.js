@@ -32,6 +32,8 @@
  *   Drop multiplexed connection for target (real: `ssh -O exit`; mock: no-op success).
  * @property {(target: string, remoteCommand: string) => import('node:child_process').ChildProcess} spawnInteractive
  *   Spawn an interactive session with PTY-like stdio pipes (stdin/stdout/stderr).
+ * @property {(target: string, remoteCommand: string) => import('node:child_process').ChildProcess} spawnBackground
+ *   Spawn a detached background session with stdout/stderr pipes (stdin is ignored).
  * @property {() => boolean} [getMuxEnabled]
  *   Whether ControlMaster multiplexing is currently enabled (real transport may flip this off after a Windows OpenSSH failure).
  * @property {() => void} [dispose]

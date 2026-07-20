@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createHandlers } from "../src/app.js";
+import { createJobManager } from "../src/jobs.js";
 import { createMockTransport, resolveRemotePath } from "../src/transport/mock.js";
 import { remoteShellCommand } from "../src/util.js";
 
@@ -89,15 +90,18 @@ describe("handlers via mock transport (SSH contract)", () => {
   /** @type {ReturnType<typeof createHandlers>} */
   let api;
   let localDir;
+  let jobManager;
 
   before(() => {
     transport = createMockTransport({ identity: { uid: "1000", hostname: "mock-host" } });
-    api = createHandlers(transport);
     localDir = mkdtempSync(join(tmpdir(), "mcp-ssh-handler-"));
+    jobManager = createJobManager({ jobDir: join(localDir, "jobs") });
+    api = createHandlers(transport, { jobManager });
   });
 
   after(() => {
     api.killAllInteractiveSessions();
+    api.jobManager.killAll("SIGTERM");
     transport.dispose();
     rmSync(localDir, { recursive: true, force: true });
   });
@@ -122,6 +126,23 @@ describe("handlers via mock transport (SSH contract)", () => {
 
     const read = await api.handlers.ssh_read_file({ target: TARGET, path });
     assert.equal(textOf(read), "PORT=3000\n");
+  });
+
+  it("ssh_read_file supports offset and limit", async () => {
+    const path = "app/lines.txt";
+    await api.handlers.ssh_write_file({
+      target: TARGET,
+      path,
+      content: "line1\nline2\nline3\nline4\nline5\n",
+      append: false,
+      create_dirs: true,
+    });
+    const partial = await api.handlers.ssh_read_file({ target: TARGET, path, offset: 2, limit: 2 });
+    assert.equal(textOf(partial), "line2\nline3\n");
+
+    const full = await api.handlers.ssh_read_file({ target: TARGET, path, limit: 0 });
+    assert.equal(full.isError, undefined);
+    assert.equal(textOf(full), "line1\nline2\nline3\nline4\nline5\n");
   });
 
   it("ssh_write_file appends when append=true", async () => {
@@ -162,10 +183,34 @@ describe("handlers via mock transport (SSH contract)", () => {
     assert.match(textOf(both), /^exit_code=4\nout\n\[stderr\]\nerr\n/);
   });
 
-  it("ssh_list_dir lists created files", async () => {
+  it("ssh_exec supports stdin, cwd, env, and ok_codes", async () => {
+    await api.handlers.ssh_mkdir({ target: TARGET, path: "releases/42" });
+
+    const stdin = await api.handlers.ssh_exec({ target: TARGET, command: "cat", stdin: "hello\n" });
+    assert.equal(stdin.isError, undefined);
+    assert.match(textOf(stdin), /exit_code=0/);
+    assert.match(textOf(stdin), /hello/);
+
+    const cwd = await api.handlers.ssh_exec({ target: TARGET, command: "pwd", cwd: "releases/42" });
+    assert.equal(cwd.isError, undefined);
+    assert.match(textOf(cwd), /releases\/42/);
+
+    const env = await api.handlers.ssh_exec({ target: TARGET, command: "printf '%s\\n' \"$FOO\"", env: { FOO: "bar" } });
+    assert.equal(env.isError, undefined);
+    assert.match(textOf(env), /bar/);
+
+    const ok = await api.handlers.ssh_exec({ target: TARGET, command: "exit 7", ok_codes: [7] });
+    assert.equal(ok.isError, undefined);
+    assert.match(textOf(ok), /exit_code=7/);
+  });
+
+  it("ssh_list_dir lists created files with ls -lAh metadata", async () => {
     await api.handlers.ssh_write_file({ target: TARGET, path: "listed/a.txt", content: "x", append: false, create_dirs: true });
     const result = await api.handlers.ssh_list_dir({ target: TARGET, path: "listed" });
-    assert.match(textOf(result), /a\.txt/);
+    const text = textOf(result);
+    assert.match(text, /a\.txt/);
+    assert.match(text, /total/);
+    assert.match(text, /[-d][r-][w-][x-]/);
   });
 
   it("ssh_grep finds matches and reports no matches cleanly", async () => {
@@ -183,6 +228,59 @@ describe("handlers via mock transport (SSH contract)", () => {
     const miss = await api.handlers.ssh_grep({ target: TARGET, pattern: "NO_SUCH_TOKEN_XYZ", path: "src" });
     assert.equal(miss.isError, undefined);
     assert.match(textOf(miss), /no matches/);
+  });
+
+  it("ssh_grep supports ripgrep-like options", async () => {
+    await api.handlers.ssh_write_file({
+      target: TARGET,
+      path: "src/items.txt",
+      content: "TODO clean\nTodo refactor\ntodo final\nother line\n",
+      append: false,
+      create_dirs: true,
+    });
+
+    const ci = await api.handlers.ssh_grep({ target: TARGET, pattern: "todo", path: "src", ignore_case: true });
+    assert.equal(ci.isError, undefined);
+    assert.match(textOf(ci), /TODO clean/);
+    assert.match(textOf(ci), /Todo refactor/);
+    assert.match(textOf(ci), /todo final/);
+
+    const fixed = await api.handlers.ssh_grep({ target: TARGET, pattern: "a.b", path: "src", fixed_strings: true });
+    assert.equal(fixed.isError, undefined);
+    assert.equal(textOf(fixed).includes("TODO clean"), false);
+    assert.equal(textOf(fixed).includes("const x = 1"), false);
+
+    const limited = await api.handlers.ssh_grep({ target: TARGET, pattern: "todo", path: "src", ignore_case: true, max_results: 2 });
+    assert.equal(limited.isError, undefined);
+    const limitedText = textOf(limited);
+    assert.match(limitedText, /TODO clean/);
+    assert.match(limitedText, /Todo refactor/);
+  });
+
+  it("ssh_apply_patch supports dry-run and strip", async () => {
+    const available = await api.handlers.ssh_exec({
+      target: TARGET,
+      command: "if command -v patch >/dev/null 2>&1 || command -v git >/dev/null 2>&1; then echo ok; fi",
+    });
+    if (!textOf(available).includes("ok")) return;
+
+    await api.handlers.ssh_write_file({ target: TARGET, path: "patches/a.txt", content: "old\n", append: false, create_dirs: true });
+    await api.handlers.ssh_write_file({ target: TARGET, path: "patches/b.txt", content: "new\n", append: false, create_dirs: true });
+
+    const diff = await api.handlers.ssh_exec({ target: TARGET, command: "diff -u patches/a.txt patches/b.txt", ok_codes: [1] });
+    const patchText = textOf(diff).replace(/^exit_code=1\n/, "");
+
+    const dry = await api.handlers.ssh_apply_patch({ target: TARGET, patch: patchText, strip: 0, dry_run: true });
+    assert.equal(dry.isError, undefined);
+
+    const before = await api.handlers.ssh_read_file({ target: TARGET, path: "patches/a.txt" });
+    assert.equal(textOf(before), "old\n");
+
+    const applied = await api.handlers.ssh_apply_patch({ target: TARGET, patch: patchText, strip: 0 });
+    assert.equal(applied.isError, undefined);
+
+    const after = await api.handlers.ssh_read_file({ target: TARGET, path: "patches/a.txt" });
+    assert.equal(textOf(after), "new\n");
   });
 
   it("ssh_delete removes a file", async () => {
@@ -312,5 +410,59 @@ describe("handlers via mock transport (SSH contract)", () => {
     const result = await api.handlers.ssh_ping({ target: "not-a-target" });
     assert.equal(result.isError, true);
     assert.match(textOf(result), /user@host/);
+  });
+
+  it("ssh_exec background starts a detached job and returns a job_id", async () => {
+    const started = await api.handlers.ssh_exec({
+      target: TARGET,
+      command: "sleep 0.2; echo 'job done'",
+      background: true,
+    });
+    assert.equal(started.isError, undefined);
+    const text = textOf(started);
+    assert.match(text, /job_id=/);
+    assert.match(text, /status=started/);
+
+    const jobId = text.match(/job_id=([^\n]+)/)[1];
+    const result = await api.handlers.ssh_exec_result({
+      job_id: jobId,
+      wait: true,
+      timeout_ms: 5000,
+    });
+    assert.equal(result.isError, undefined);
+    const resultText = textOf(result);
+    assert.match(resultText, /status=exited/);
+    assert.match(resultText, /job done/);
+    assert.match(resultText, /exit_code=0/);
+  });
+
+  it("ssh_exec background rejects stdin", async () => {
+    const result = await api.handlers.ssh_exec({
+      target: TARGET,
+      command: "cat",
+      background: true,
+      stdin: "x\n",
+    });
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /stdin.*background/);
+  });
+
+  it("ssh_exec_kill stops a background job and can clean up", async () => {
+    const started = await api.handlers.ssh_exec({
+      target: TARGET,
+      command: "sleep 60",
+      background: true,
+    });
+    const jobId = textOf(started).match(/job_id=([^\n]+)/)[1];
+
+    const killed = await api.handlers.ssh_exec_kill({ job_id: jobId, signal: "SIGTERM" });
+    assert.equal(killed.isError, undefined);
+    assert.match(textOf(killed), /killed=true/);
+
+    const result = await api.handlers.ssh_exec_result({ job_id: jobId, wait: true, timeout_ms: 2000 });
+    assert.match(textOf(result), /status=exited/);
+
+    const cleaned = await api.handlers.ssh_exec_kill({ job_id: jobId, cleanup: true });
+    assert.match(textOf(cleaned), /cleaned=true/);
   });
 });

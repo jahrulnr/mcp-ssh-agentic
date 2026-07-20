@@ -155,6 +155,16 @@ export function createMockTransport({
     });
   }
 
+  function spawnBackground(target, remoteCommand) {
+    parseTarget(target);
+    return spawn("bash", ["--noprofile", "--norc", "-c", remoteCommand], {
+      stdio: ["ignore", "pipe", "pipe"],
+      cwd: root,
+      env,
+      detached: true,
+    });
+  }
+
   function dispose() {
     if (ownedRoot) {
       try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -167,6 +177,7 @@ export function createMockTransport({
     scp,
     close,
     spawnInteractive,
+    spawnBackground,
     getMuxEnabled: () => true,
     dispose,
     resolvePath: (p) => resolveRemotePath(root, p),
