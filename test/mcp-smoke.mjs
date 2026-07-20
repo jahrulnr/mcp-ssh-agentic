@@ -31,6 +31,7 @@ async function packForNpx() {
   const child = spawn("npm", ["pack", "--pack-destination", dir], {
     cwd: root,
     stdio: ["ignore", "pipe", "pipe"],
+    shell: process.platform === "win32",
   });
   let out = "";
   let err = "";
